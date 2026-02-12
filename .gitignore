@@ -1,0 +1,19 @@
+node_modules/
+cache/
+artifacts/
+typechain-types/
+dist/
+coverage/
+coverage.json*
+
+# Env and secrets (never commit)
+.env
+.env.*
+.env.local
+.env.production
+*.pem
+secrets/
+
+# Build artifacts
+*.log
+MemoGC_flat.sol
