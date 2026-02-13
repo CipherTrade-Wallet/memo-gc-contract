@@ -5,7 +5,7 @@ import "@coti-io/coti-contracts/contracts/utils/mpc/MpcCore.sol";
 
 /**
  * MemoGC: Private memo + optional native COTI transfer with configurable fee.
- * - Memo: private (itString); validated and stored encrypted for recipient (only they can decrypt).
+ * - Memo: private (itString); validated and stored encrypted for recipient and sender (both can decrypt).
  * - Recipient: public (required by COTI; no private address type).
  * - Optional native COTI: send with msg.value; fee goes to feeRecipient, remainder to recipient.
  * - Ownership, fee recipient and fee amount are public and changeable by owner.
@@ -22,8 +22,8 @@ contract MemoGC {
     event FeeRecipientSet(address indexed feeRecipient);
     event FeeAmountSet(uint256 feeAmount);
     event Submitted(address indexed recipient, uint256 valueSent, uint256 feeTaken);
-    /// Emitted for every submit; recipient can query logs for full history or get receipt by tx hash and decrypt.
-    event MemoSubmitted(address indexed recipient, address indexed from, utString memoForRecipient);
+    /// Emitted for every submit; recipient and sender can query logs for full history or get receipt by tx hash and decrypt.
+    event MemoSubmitted(address indexed recipient, address indexed from, utString memoForRecipient, utString memoForSender);
 
     error OnlyOwner();
     error InvalidRecipient();
@@ -74,9 +74,10 @@ contract MemoGC {
     function submit(address recipient, itString calldata memo) external payable {
         if (recipient == address(0)) revert InvalidRecipient();
         gtString memory gtMemo = MpcCore.validateCiphertext(memo);
-        utString memory ut = MpcCore.offBoardCombined(gtMemo, recipient);
-        lastMemoForRecipient[recipient] = ut;
-        emit MemoSubmitted(recipient, msg.sender, ut);
+        utString memory utRecipient = MpcCore.offBoardCombined(gtMemo, recipient);
+        utString memory utSender = MpcCore.offBoardCombined(gtMemo, msg.sender);
+        lastMemoForRecipient[recipient] = utRecipient;
+        emit MemoSubmitted(recipient, msg.sender, utRecipient, utSender);
 
         uint256 value = msg.value;
         if (value > 0) {
