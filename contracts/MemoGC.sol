@@ -7,13 +7,16 @@ import "@coti-io/coti-contracts/contracts/utils/mpc/MpcCore.sol";
  * MemoGC: Private memo + optional native COTI transfer with configurable fee.
  * - Memo: private (itString); validated and stored encrypted for recipient and sender (both can decrypt).
  * - Recipient: public (required by COTI; no private address type).
- * - Optional native COTI: send with msg.value; fee goes to feeRecipient, remainder to recipient.
+ * - Fee: msg.value must be >= feeAmount. Fee goes to feeRecipient; remainder (if any) to recipient as tip.
  * - Ownership, fee recipient and fee amount are public and changeable by owner.
+ * - Pausable: owner can pause/unpause submissions.
  */
 contract MemoGC {
     address public owner;
     address public feeRecipient;
     uint256 public feeAmount;
+    bool public paused;
+    uint256 private _locked;
 
     /// Last memo (encrypted for recipient) per recipient; recipient can fetch and decrypt off-chain.
     mapping(address => utString) public lastMemoForRecipient;
@@ -21,6 +24,8 @@ contract MemoGC {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event FeeRecipientSet(address indexed feeRecipient);
     event FeeAmountSet(uint256 feeAmount);
+    event Paused();
+    event Unpaused();
     event Submitted(address indexed recipient, uint256 valueSent, uint256 feeTaken);
     /// Emitted for every submit; recipient and sender can query logs for full history or get receipt by tx hash and decrypt.
     event MemoSubmitted(address indexed recipient, address indexed from, utString memoForRecipient, utString memoForSender);
@@ -28,14 +33,31 @@ contract MemoGC {
     error OnlyOwner();
     error InvalidRecipient();
     error InvalidFeeRecipient();
+    error InsufficientFee();
     error TransferFailed();
+    error WhenPaused();
+    error ReentrancyGuard();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
         _;
     }
 
+    modifier whenNotPaused() {
+        if (paused) revert WhenPaused();
+        _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked != 0) revert ReentrancyGuard();
+        _locked = 1;
+        _;
+        _locked = 0;
+    }
+
     constructor(address initialOwner_, address initialFeeRecipient_, uint256 initialFeeAmount_) {
+        if (initialOwner_ == address(0)) revert InvalidRecipient();
+        if (initialFeeRecipient_ == address(0)) revert InvalidFeeRecipient();
         owner = initialOwner_;
         feeRecipient = initialFeeRecipient_;
         feeAmount = initialFeeAmount_;
@@ -65,14 +87,30 @@ contract MemoGC {
         emit FeeAmountSet(newFeeAmount);
     }
 
+    /// Pause submissions. Owner only.
+    function pause() external onlyOwner {
+        if (paused) return;
+        paused = true;
+        emit Paused();
+    }
+
+    /// Unpause submissions. Owner only.
+    function unpause() external onlyOwner {
+        if (!paused) return;
+        paused = false;
+        emit Unpaused();
+    }
+
     /**
      * Submit a private memo and optionally send native COTI to the recipient.
      * @param recipient Recipient (visible on-chain).
      * @param memo Private memo (itString); client must encrypt with COTI SDK before calling.
-     * If msg.value > 0: fee = min(feeAmount, msg.value) is sent to feeRecipient, rest to recipient.
+     * msg.value must be >= feeAmount. Fee goes to feeRecipient; remainder to recipient as tip.
      */
-    function submit(address recipient, itString calldata memo) external payable {
+    function submit(address recipient, itString calldata memo) external payable whenNotPaused nonReentrant {
         if (recipient == address(0)) revert InvalidRecipient();
+        if (msg.value < feeAmount) revert InsufficientFee();
+
         gtString memory gtMemo = MpcCore.validateCiphertext(memo);
         utString memory utRecipient = MpcCore.offBoardCombined(gtMemo, recipient);
         utString memory utSender = MpcCore.offBoardCombined(gtMemo, msg.sender);
@@ -80,19 +118,18 @@ contract MemoGC {
         emit MemoSubmitted(recipient, msg.sender, utRecipient, utSender);
 
         uint256 value = msg.value;
-        if (value > 0) {
-            uint256 fee = feeAmount < value ? feeAmount : value;
-            uint256 toRecipient = value - fee;
-            if (fee > 0 && feeRecipient != address(0)) {
-                (bool ok, ) = payable(feeRecipient).call{value: fee}("");
-                if (!ok) revert TransferFailed();
-            }
-            if (toRecipient > 0) {
-                (bool ok, ) = payable(recipient).call{value: toRecipient}("");
-                if (!ok) revert TransferFailed();
-            }
-            emit Submitted(recipient, value, fee);
+        uint256 fee = feeAmount < value ? feeAmount : value;
+        uint256 toRecipient = value - fee;
+
+        if (fee > 0 && feeRecipient != address(0)) {
+            (bool ok, ) = payable(feeRecipient).call{value: fee}("");
+            if (!ok) revert TransferFailed();
         }
+        if (toRecipient > 0) {
+            (bool ok, ) = payable(recipient).call{value: toRecipient}("");
+            if (!ok) revert TransferFailed();
+        }
+        emit Submitted(recipient, value, fee);
     }
 
     /// Recipient can call this to get their last memo (utString); decrypt off-chain with COTI SDK.
